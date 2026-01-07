@@ -160,24 +160,142 @@ class Yarn(Node):
         )
 
 
-class JLabExtension(Yarn):
-    """A node variant specific to JLab
+class JLabExtension(Node):
+    """JupyterLab extension project
 
-    https://jupyterlab.readthedocs.io/en/latest/developer/contributing.html
-      #installing-node-js-and-jlpm
+    JupyterLab extensions are Node.js packages with special 'jupyterlab' field
+    in package.json. They may include Python companion packages for server
+    extensions.
+
+    https://jupyterlab.readthedocs.io/en/latest/extension/extension_dev.html
     """
 
-    # TODO: this should match even if yarn.lock is missing, so long as package.json
-    #  does exist, and uses jlpm to build
+    spec_doc = "https://jupyterlab.readthedocs.io/en/latest/extension/extension_dev.html"
+
+    def match(self):
+        """Match if package.json exists and has jupyterlab field"""
+        if "package.json" not in self.proj.basenames:
+            return False
+
+        import json
+        try:
+            with self.proj.fs.open(f"{self.proj.url}/package.json", "rt") as f:
+                pkg_json = json.load(f)
+            # Check for jupyterlab field which indicates this is a JupyterLab extension
+            return "jupyterlab" in pkg_json
+        except Exception:
+            return False
 
     def parse(self):
+        import toml
         from projspec.artifact.python_env import LockFile
+        from projspec.content.package import PythonPackage
+        from projspec.utils import PickleableTomlDecoder
 
-        super().parse()
-        if not self.meta["scripts"]["build"].startswith("jlpm"):
-            raise ValueError
-        self.artifacts["lock_file"] = LockFile(
+        # Parse base Node.js package info
+        super().parse0()
+
+        # Extract JupyterLab-specific metadata
+        jlab_meta = self.meta.get("jupyterlab", {})
+
+        # Determine extension type
+        extension_types = []
+        if jlab_meta.get("extension"):
+            extension_types.append("frontend")
+        if jlab_meta.get("mimeExtension"):
+            extension_types.append("mime-renderer")
+        if jlab_meta.get("themePath"):
+            extension_types.append("theme")
+        if jlab_meta.get("discovery"):
+            extension_types.append("server")
+
+        # Add extension type to metadata
+        if hasattr(self, '_contents') and 'descriptive_metadata' in self._contents:
+            existing_meta = self._contents['descriptive_metadata'].meta
+            existing_meta.update({
+                "jupyterlab": {
+                    "extension_types": extension_types,
+                    "output_dir": jlab_meta.get("outputDir"),
+                    "schema_dir": jlab_meta.get("schemaDir"),
+                    "theme_path": jlab_meta.get("themePath"),
+                }
+            })
+
+        # Update lock file command to use jlpm if yarn.lock exists
+        if "yarn.lock" in self.proj.basenames:
+            self._artifacts["lock_file"] = LockFile(
+                proj=self.proj,
+                cmd=["jlpm", "install"],
+                fn=self.proj.basenames["yarn.lock"],
+            )
+
+        # Add JupyterLab-specific commands
+        scripts = self.meta.get("scripts", {})
+
+        # Development mode installation
+        if not hasattr(self, '_contents'):
+            self._contents = AttrDict()
+        if 'command' not in self._contents:
+            self._contents['command'] = (AttrDict(),)
+
+        cmd_dict = self._contents['command'][0] if isinstance(self._contents['command'], tuple) else self._contents['command']
+
+        # jupyter labextension develop
+        cmd_dict['labextension_develop'] = Command(
             proj=self.proj,
-            cmd=["jlpm", "install"],
-            fn=self.proj.basenames["yarn.lock"],
+            cmd=["jupyter", "labextension", "develop", ".", "--overwrite"],
+            artifacts=set()
         )
+
+        # jupyter labextension list
+        cmd_dict['labextension_list'] = Command(
+            proj=self.proj,
+            cmd=["jupyter", "labextension", "list"],
+            artifacts=set()
+        )
+
+        # jupyter lab build
+        cmd_dict['lab_build'] = Command(
+            proj=self.proj,
+            cmd=["jupyter", "lab", "build"],
+            artifacts=set()
+        )
+
+        # jlpm watch (if watch script exists)
+        if "watch" in scripts:
+            cmd_dict['jlpm_watch'] = Command(
+                proj=self.proj,
+                cmd=["jlpm", "run", "watch"],
+                artifacts=set()
+            )
+
+        # Check for Python companion package
+        has_python_package = False
+        if "pyproject.toml" in self.proj.basenames:
+            has_python_package = True
+            # Add Python package reference
+            try:
+                with self.proj.fs.open(f"{self.proj.url}/pyproject.toml", "rt") as f:
+                    pyproject = toml.load(f, decoder=PickleableTomlDecoder())
+
+                pkg_name = None
+                if "project" in pyproject:
+                    pkg_name = pyproject["project"].get("name")
+                elif "tool" in pyproject and "poetry" in pyproject["tool"]:
+                    pkg_name = pyproject["tool"]["poetry"].get("name")
+
+                if pkg_name and not hasattr(self._contents, 'python_package'):
+                    self._contents['python_package'] = PythonPackage(
+                        name=pkg_name,
+                        proj=self.proj,
+                        artifacts=set()
+                    )
+            except Exception:
+                pass  # If we can't parse it, that's okay
+
+        elif "setup.py" in self.proj.basenames:
+            has_python_package = True
+
+        # Update metadata with Python package info
+        if has_python_package and hasattr(self, '_contents') and 'descriptive_metadata' in self._contents:
+            self._contents['descriptive_metadata'].meta.setdefault("jupyterlab", {})["has_python_package"] = True
