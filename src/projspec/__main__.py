@@ -153,9 +153,9 @@ def info(types=None):
 
 
 @main.command("create")
-@click.argument("spec_type")
+@click.argument("type")
 @click.argument("path", default=".")
-def create(spec_type, path):
+def create(type, path):
     """Create a new project of the given type in the given path.
 
     Returns the list of files created.
@@ -165,13 +165,13 @@ def create(spec_type, path):
     from projspec.proj import Project
     from projspec.proj.base import ProjectSpec, registry
 
-    if spec_type not in registry:
-        print(f"Unknown spec type: {spec_type}")
+    if type not in registry:
+        print(f"Unknown spec type: {type}")
         sys.exit(1)
     proj = Project(path)
-    if spec_type not in proj:
+    if type not in proj:
         try:
-            files = proj.create(spec_type)
+            files = proj.create(type)
         except NotImplementedError:
             supported = sorted(
                 name
@@ -179,14 +179,14 @@ def create(spec_type, path):
                 if cls._create is not ProjectSpec._create
             )
             print(
-                f"Spec type '{spec_type}' does not support creation.\n"
+                f"Spec type '{type}' does not support creation.\n"
                 f"Types that support creation: {', '.join(supported)}"
             )
             sys.exit(1)
         for afile in files:
             print(afile)
     else:
-        print(f"Project already has a {spec_type} spec")
+        print(f"Project already has a {type} spec")
 
 
 @main.group("library")
